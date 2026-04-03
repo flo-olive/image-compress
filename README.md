@@ -12,8 +12,16 @@
 
 ## 설치
 
+**1. 스킬 폴더에 클론**
+
 ```bash
-npm install
+git clone https://github.com/flo-olive/image-compress ~/.claude/skills/image-compress
+```
+
+**2. 의존성 설치**
+
+```bash
+cd ~/.claude/skills/image-compress && npm install
 ```
 
 ## 사용법
