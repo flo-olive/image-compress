@@ -3,7 +3,10 @@ const sharp = require("sharp");
 const fs = require("fs");
 const path = require("path");
 
-const TARGET_SIZE = 300 * 1024; // 300kb
+const PRIMARY_RATIO = 0.5;   // -50%
+const SECONDARY_RATIO = 0.4; // -60%
+const SECONDARY_THRESHOLD = 500 * 1024; // 500kb 이상이면 2차 압축
+
 const dirArg = process.argv[2];
 
 if (!dirArg) {
@@ -18,26 +21,24 @@ if (!fs.existsSync(dir)) {
   process.exit(1);
 }
 
-async function compressJpeg(filePath) {
-  const originalSize = fs.statSync(filePath).size;
-  for (let quality = 80; quality >= 30; quality -= 10) {
+async function compressJpeg(filePath, targetSize) {
+  for (let quality = 80; quality >= 10; quality -= 10) {
     const buf = await sharp(filePath)
       .jpeg({ quality, mozjpeg: true })
       .toBuffer();
-    if (buf.length <= TARGET_SIZE || quality <= 30) {
-      return { buf, originalSize };
+    if (buf.length <= targetSize || quality <= 10) {
+      return buf;
     }
   }
 }
 
-async function compressPng(filePath) {
-  const originalSize = fs.statSync(filePath).size;
-  for (const colours of [256, 128, 64]) {
+async function compressPng(filePath, targetSize) {
+  for (const colours of [256, 128, 64, 32, 16]) {
     const buf = await sharp(filePath)
       .png({ compressionLevel: 9, palette: true, colours })
       .toBuffer();
-    if (buf.length <= TARGET_SIZE || colours === 64) {
-      return { buf, originalSize };
+    if (buf.length <= targetSize || colours === 16) {
+      return buf;
     }
   }
 }
@@ -48,46 +49,53 @@ async function processFile(filePath) {
   const base = path.basename(filePath, ext);
   const dirName = path.dirname(filePath);
 
-  if (base.endsWith("_mini")) {
+  if (base.endsWith("_mini") || /_mini_\d+kb$/.test(base)) {
     console.log(`건너뜀 (이미 _mini): ${path.basename(filePath)}`);
     return;
   }
 
-  if (stats.size <= TARGET_SIZE) {
-    console.log(
-      `건너뜀 (${(stats.size / 1024).toFixed(0)}kb ≤ 300kb): ${path.basename(filePath)}`,
-    );
+  const originalSize = stats.size;
+  const primaryTarget = Math.floor(originalSize * PRIMARY_RATIO);
+
+  let buf;
+  if (ext === ".jpg" || ext === ".jpeg") {
+    buf = await compressJpeg(filePath, primaryTarget);
+  } else if (ext === ".png") {
+    buf = await compressPng(filePath, primaryTarget);
+  } else {
     return;
   }
 
-  let result;
-  if (ext === ".jpg" || ext === ".jpeg") {
-    result = await compressJpeg(filePath);
-  } else if (ext === ".png") {
-    result = await compressPng(filePath);
+  if (!buf) return;
+
+  // 1차 압축 후 500kb 이상이면 원본에서 -60%로 재압축
+  let usedRatio = "-50%";
+  if (buf.length >= SECONDARY_THRESHOLD) {
+    const secondaryTarget = Math.floor(originalSize * SECONDARY_RATIO);
+    let buf2;
+    if (ext === ".jpg" || ext === ".jpeg") {
+      buf2 = await compressJpeg(filePath, secondaryTarget);
+    } else if (ext === ".png") {
+      buf2 = await compressPng(filePath, secondaryTarget);
+    }
+    if (buf2) {
+      buf = buf2;
+      usedRatio = "-60%";
+    }
   }
 
-  if (!result) return;
+  const finalKb = Math.round(buf.length / 1024);
+  const origKb = Math.round(originalSize / 1024);
+  const saved = Math.round((1 - buf.length / originalSize) * 100);
 
-  const { buf, originalSize } = result;
-  const outputPath = path.join(dirName, `${base}_mini${ext}`);
+  const outputPath = path.join(dirName, `${base}_mini_${finalKb}kb${ext}`);
 
   fs.writeFileSync(outputPath, buf);
   fs.unlinkSync(filePath);
 
-  const saved = ((1 - buf.length / originalSize) * 100).toFixed(0);
-  const origKb = (originalSize / 1024).toFixed(0);
-  const finalKb = (buf.length / 1024).toFixed(0);
-
-  if (buf.length > TARGET_SIZE) {
-    console.log(
-      `⚠ ${path.basename(filePath)} → ${path.basename(outputPath)} (${origKb}kb → ${finalKb}kb, 300kb 미만 달성 불가)`,
-    );
-  } else {
-    console.log(
-      `✓ ${path.basename(filePath)} → ${path.basename(outputPath)} (${origKb}kb → ${finalKb}kb, ${saved}% 감소)`,
-    );
-  }
+  console.log(
+    `✓ ${path.basename(filePath)} → ${path.basename(outputPath)} (${origKb}kb → ${finalKb}kb, ${saved}% 감소, ${usedRatio} 적용)`,
+  );
 }
 
 function collectFiles(dirPath) {
